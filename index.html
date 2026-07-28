@@ -2509,127 +2509,134 @@ function openSyncModal(){
 }
 function closeSyncModal(){document.getElementById('syncModal').classList.remove('show')}
 
-// 压缩数据为短同步码（用 LZString 思路简化：直接 base64 + 去除冗余）
+// 压缩数据为同步码
+// 策略：plans 只传 done+progress（文本从 D_PLANS 重建），大幅缩减体积
 function packData(data){
-  const json=JSON.stringify(data);
-  // 使用 btoa + encodeURIComponent 压缩
-  return btoa(unescape(encodeURIComponent(json)));
+  // 深拷贝后精简 plans
+  const d=JSON.parse(JSON.stringify(data));
+  if(d.plans && d.plans.length){
+    d.plans=d.plans.map(sec=>({
+      section:sec.section,
+      goals:sec.goals.map(g=>({done:g.done,progress:g.progress}))
+    }));
+  }
+  const json=JSON.stringify(d);
+  // 键名替换（高频键→2字节）
+  const keys=[
+    '"done":false','"done":true','"progress":0','"progress":100',
+    '"id":"','"text":"','"section":"','"goals":','"stage":','"note":"',
+    '"company":"','"position":"','"salary":"','"location":"','"requirement":"',
+    'studyType":"','"count":{"cur":0,"target":10}','"count":{"cur":0,"target":5}',
+    '"studyLevel":','"studyProgress":','"wrongBook":','"studyHistory":',
+    '"ielts_words":','"ielts_reading":','"ielts_listening":','"ielts_speaking":',
+    '"trade_words":','"ecommerce":'
+  ];
+  let compressed=json;
+  keys.forEach((k,i)=>{
+    compressed=compressed.split(k).join('\x01'+String.fromCharCode(32+i));
+  });
+  // base64url 编码
+  const b64=btoa(unescape(encodeURIComponent(compressed)));
+  return b64.replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'');
 }
+
 function unpackData(code){
   try{
-    return JSON.parse(decodeURIComponent(escape(atob(code))));
+    const std=code.replace(/-/g,'+').replace(/_/g,'/');
+    let decompressed=decodeURIComponent(escape(atob(std)));
+    const keys=[
+      '"done":false','"done":true','"progress":0','"progress":100',
+      '"id":"','"text":"','"section":"','"goals":','"stage":','"note":"',
+      '"company":"','"position":"','"salary":"','"location":"','"requirement":"',
+      'studyType":"','"count":{"cur":0,"target":10}','"count":{"cur":0,"target":5}',
+      '"studyLevel":','"studyProgress":','"wrongBook":','"studyHistory":',
+      '"ielts_words":','"ielts_reading":','"ielts_listening":','"ielts_speaking":',
+      '"trade_words":','"ecommerce":'
+    ];
+    keys.forEach((k,i)=>{
+      decompressed=decompressed.split('\x01'+String.fromCharCode(32+i)).join(k);
+    });
+    const data=JSON.parse(decompressed);
+    // 用 D_PLANS 模板重建 plans 的完整数据
+    if(data.plans && D_PLANS && D_PLANS.length){
+      data.plans=data.plans.map((sec,i)=>{
+        const template=D_PLANS[i]||D_PLANS[0];
+        return {
+          section:sec.section||template.section,
+          goals:sec.goals.map((g,j)=>({
+            id:uid(),
+            text:template.goals[j]?template.goals[j].text:'',
+            done:g.done,
+            progress:g.progress
+          }))
+        };
+      });
+    }
+    return data;
   }catch(e){return null}
 }
 
-// 生成同步码（分段模式）
+// 生成同步码（单段，1000字以内）
 function showSyncCode(){
   const code=packData(appData);
   const now=new Date();
   const ts=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0')+'-'+String(now.getDate()).padStart(2,'0')+' '+String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
   localStorage.setItem('wb_sync_time',ts);
-  // 每段最多2000字符（微信单条消息限制约4000，取2000更安全）
-  const chunkSize=2000;
-  const total=Math.ceil(code.length/chunkSize);
-  let chunkHtml='';
-  for(let i=0;i<total;i++){
-    const chunk=code.slice(i*chunkSize,(i+1)*chunkSize);
-    const label='['+(i+1)+'/'+total+']';
-    const fullChunk=label+chunk;
-    chunkHtml+=`<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
-      <span style="font-size:.7rem;font-weight:600;color:var(--primary);white-space:nowrap">第${i+1}段</span>
-      <code style="flex:1;font-size:.58rem;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${chunk.slice(0,30)}...</code>
-      <button class="topbar-btn" style="background:var(--primary);color:#fff;border:none;font-size:.65rem;padding:3px 8px" onclick="copyChunk('${fullChunk.replace(/'/g,"\\'").replace(/"/g,'&quot;').replace(/\n/g,'\\n')}','${i+1}')">复制</button>
-    </div>`;
-  }
   const area=document.getElementById('syncCodeArea');
+  const tooLong=code.length>950;
   area.innerHTML=`<div style="background:var(--bg);border-radius:8px;padding:12px;margin-top:8px">
-    <div style="font-size:.7rem;color:var(--text2);margin-bottom:4px">&#128273; 分段同步码 · ${ts} · 共${total}段</div>
-    <div style="font-size:.62rem;color:var(--orange);margin-bottom:8px">&#9888; 按顺序逐段复制发到微信，在另一设备逐段粘贴</div>
-    <div style="max-height:200px;overflow-y:auto">${chunkHtml}</div>
+    <div style="font-size:.7rem;color:var(--text2);margin-bottom:4px">&#128273; 同步码 · ${ts} · ${code.length}字${tooLong?' &#9888; 偏长，建议用导出JSON':''}</div>
+    <textarea readonly class="fund-batch-ta" style="min-height:50px;font-family:monospace;font-size:.6rem;word-break:break-all;color:var(--text)" id="syncCodeText">${code}</textarea>
     <div style="display:flex;gap:6px;margin-top:8px">
-      <button class="topbar-btn" style="flex:1;background:var(--teal);color:#fff;border:none" onclick="copyAllChunks()">&#128203; 一键复制全部</button>
+      <button class="topbar-btn" style="flex:1;background:var(--primary);color:#fff;border:none" onclick="copySyncCode()">&#128203; 复制同步码</button>
+      <button class="topbar-btn" style="background:var(--teal);color:#fff;border:none" onclick="shareSyncCode()">&#128279; 分享</button>
     </div>
-    <div style="font-size:.64rem;color:var(--text3);margin-top:6px">逐段发送到微信"文件传输助手"，接收端点「输入同步码」按顺序粘贴即可自动合并</div>
+    <div style="font-size:.64rem;color:var(--text3);margin-top:6px">复制后发到微信"文件传输助手"，在另一设备点「输入同步码」粘贴即可</div>
   </div>`;
-  // 存完整code供一键复制
-  window._syncFullCode=code;
-  window._syncTotal=total;
-  window._syncChunkSize=chunkSize;
-  toastSimple('同步码已分段');
+  window._syncCode=code;
+  toastSimple('同步码已生成（'+code.length+'字）');
 }
 
-function copyChunk(chunk,num){
+function copySyncCode(){
+  if(!window._syncCode)return;
   if(navigator.clipboard){
-    navigator.clipboard.writeText(chunk).then(()=>toastSimple('第'+num+'段已复制，发到微信'));
+    navigator.clipboard.writeText(window._syncCode).then(()=>toastSimple('已复制，发到微信'));
   }else{
-    const ta=document.createElement('textarea');ta.value=chunk;document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);toastSimple('第'+num+'段已复制');
+    const ta=document.createElement('textarea');ta.value=window._syncCode;document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);toastSimple('已复制');
   }
 }
 
-function copyAllChunks(){
-  if(!window._syncFullCode){toastSimple('请先生成同步码');return}
-  // 生成全部带标签的文本
-  const total=window._syncTotal;
-  const size=window._syncChunkSize;
-  let all='';
-  for(let i=0;i<total;i++){
-    all+='['+(i+1)+'/'+total+']'+window._syncFullCode.slice(i*size,(i+1)*size)+'\n';
-  }
-  if(navigator.clipboard){
-    navigator.clipboard.writeText(all).then(()=>toastSimple('已复制全部'+total+'段'));
-  }else{
-    const ta=document.createElement('textarea');ta.value=all;document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);toastSimple('已复制全部');
-  }
-}
-
-// 分享同步码（调用系统分享，用于手机）
-function shareCode(code){
+function shareSyncCode(){
+  if(!window._syncCode)return;
   if(navigator.share){
-    navigator.share({title:'工作台同步码',text:code}).catch(()=>{});
+    navigator.share({title:'工作台同步码',text:window._syncCode}).catch(()=>{});
   }else{
-    copyFullCode(code);
+    copySyncCode();
   }
 }
 
-// 输入同步码恢复（支持多段自动合并）
+// 输入同步码恢复
 function showImportCode(){
   const area=document.getElementById('syncCodeArea');
   area.innerHTML=`<div style="background:var(--bg);border-radius:8px;padding:12px;margin-top:8px">
-    <div style="font-size:.7rem;color:var(--text2);margin-bottom:6px">&#128229; 粘贴同步码（支持多段自动合并）</div>
-    <textarea id="syncCodeInput" class="fund-batch-ta" placeholder="将同步码逐段粘贴到这里（可多次粘贴，自动合并）..." style="min-height:80px;font-family:monospace;font-size:.65rem"></textarea>
+    <div style="font-size:.7rem;color:var(--text2);margin-bottom:6px">&#128229; 输入同步码</div>
+    <textarea id="syncCodeInput" class="fund-batch-ta" placeholder="将同步码粘贴到这里（微信复制过来的整段即可）..." style="min-height:60px;font-family:monospace;font-size:.65rem"></textarea>
     <div style="display:flex;gap:6px;margin-top:8px">
       <button class="topbar-btn" style="flex:1;background:var(--primary);color:#fff;border:none" onclick="doImportCode()">&#128260; 恢复数据</button>
       <button class="topbar-btn" style="background:var(--text3);color:#fff;border:none" onclick="document.getElementById('syncCodeArea').innerHTML=''">取消</button>
     </div>
-    <div style="font-size:.64rem;color:var(--orange);margin-top:6px">&#9888; 恢复将覆盖当前数据。可多次粘贴，系统自动识别分段标记并合并。</div>
+    <div style="font-size:.64rem;color:var(--red);margin-top:6px">&#9888; 恢复将覆盖当前数据，建议先导出备份</div>
   </div>`;
 }
 
 function doImportCode(){
-  const raw=document.getElementById('syncCodeInput').value.trim();
-  if(!raw){toastSimple('请粘贴同步码');return}
-  // 智能解析：检测是否包含分段标记 [1/3] [2/3] 等
-  let code;
-  if(/\[\d+\/\d+\]/.test(raw)){
-    // 分段模式：提取各段并按序号拼接
-    const parts=[];
-    const regex=/\[(\d+)\/(\d+)\]([^\[]*)/g;
-    let m;
-    while((m=regex.exec(raw))!==null){
-      const idx=parseInt(m[1])-1;
-      parts[idx]=m[3];
-    }
-    // 也处理纯换行分隔的情况
-    code=parts.filter(Boolean).join('');
-    if(!code){
-      // 尝试按行解析（每行可能有标记或没有）
-      const lines=raw.split(/[\n\r]+/).filter(Boolean);
-      code=lines.map(l=>l.replace(/^\[\d+\/\d+\]/,'')).join('');
-    }
-  }else{
-    code=raw;
-  }
-  if(!code){toastSimple('未识别到有效同步码');return}
+  let code=document.getElementById('syncCodeInput').value.trim();
+  if(!code){toastSimple('请粘贴同步码');return}
+  // 清洗：去除微信可能添加的换行、空格、零宽字符
+  code=code.replace(/[\s\n\r\u200B\u200C\u200D\uFEFF]+/g,'');
+  // 尝试从文本中提取纯base64url部分
+  const m=code.match(/[A-Za-z0-9\-_]{50,}/);
+  if(m)code=m[0];
   const data=unpackData(code);
   if(!data){toastSimple('同步码格式错误，请检查是否完整复制');return}
   if(!confirm('将用同步码数据覆盖当前工作台所有数据，确定继续？'))return;
